@@ -1,6 +1,4 @@
-CREATE SCHEMA IF NOT EXISTS core AUTHORIZATION current_user;
-SET search_path = core;
-
+ROLLBACK;
 
 CREATE TYPE core.gender_t AS ENUM ('Male','Female','Other','Prefer not to say');
 CREATE TYPE core.employment_type_t AS ENUM ('fulltime','parttime','contract','intern');
@@ -24,6 +22,7 @@ BEGIN
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
+
 
 ---- locations
 CREATE TABLE core.locations (
@@ -188,7 +187,7 @@ CREATE INDEX ix_budgets_status ON core.budgets(budget_status);
 
 ---- employees
 CREATE TABLE core.employees (
-  employee_id            INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  employee_id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   employee_no            VARCHAR(50) UNIQUE,
   first_name             VARCHAR(100) NOT NULL,
   last_name              VARCHAR(100) NOT NULL,
@@ -323,26 +322,6 @@ CREATE INDEX ix_emp_assign_employee ON core.employee_assignment(employee_id);
 CREATE INDEX ix_emp_assign_is_active ON core.employee_assignment(is_active);
 
 
--- Triggers to maintain updated_at, attach trigger to all tables that have updated_at columns
-DO $$
-DECLARE
-  tbl text;
-BEGIN
-  FOR tbl IN
-    SELECT table_name
-    FROM information_schema.columns
-    WHERE table_schema = 'core'
-      AND column_name = 'updated_at'
-  LOOP
-    EXECUTE format('
-      DROP TRIGGER IF EXISTS trg_set_timestamp ON core.%I;
-      CREATE TRIGGER trg_set_timestamp
-      BEFORE UPDATE ON core.%I
-      FOR EACH ROW EXECUTE FUNCTION core.trigger_set_timestamp();
-    ', tbl, tbl);
-  END LOOP;
-END;
-$$;
 
 
 
@@ -357,21 +336,11 @@ CREATE TYPE core.hazard_classification_t AS ENUM ('Explosives', 'Flammable', 'Ox
 CREATE TYPE core.cert_status_t AS ENUM ('Valid', 'Expired', 'Pending', 'Revoked');
 
 
----- Generic trigger to update "updated_at"
-
-CREATE OR REPLACE FUNCTION core.set_updated_at()
-RETURNS TRIGGER AS $$
-BEGIN
-  NEW.updated_at = NOW();
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
 
 ---- products
 
 CREATE TABLE core.products (
-    product_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    product_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     product_code VARCHAR(50) UNIQUE NOT NULL,
     product_name VARCHAR(255) NOT NULL,
     product_type core.product_type_t NOT NULL,
@@ -397,9 +366,6 @@ CREATE INDEX idx_products_category ON core.products(category, sub_category);
 CREATE INDEX idx_products_status ON core.products(product_status);
 CREATE INDEX idx_products_launch_date ON core.products(launch_date);
 
-CREATE TRIGGER trg_products_updated_at
-BEFORE UPDATE ON core.products
-FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
 
  
 ---- product_dimensions
@@ -423,9 +389,7 @@ CREATE TABLE core.product_dimensions (
 CREATE INDEX idx_dimensions_weight ON core.product_dimensions(weight_kg);
 CREATE INDEX idx_dimensions_volume ON core.product_dimensions(volume_cubic_metre);
 
-CREATE TRIGGER trg_dimensions_updated_at
-BEFORE UPDATE ON core.product_dimensions
-FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
+
 
 
 --== specification_attributes
@@ -447,9 +411,7 @@ CREATE INDEX idx_attributes_product ON core.specification_attributes(product_id)
 CREATE INDEX idx_attributes_name ON core.specification_attributes(attribute_name);
 CREATE INDEX idx_attributes_searchable ON core.specification_attributes(is_searchable);
 
-CREATE TRIGGER trg_attributes_updated_at
-BEFORE UPDATE ON core.specification_attributes
-FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
+
 
 
 -- product_pricing
@@ -477,12 +439,11 @@ CREATE INDEX idx_pricing_currency ON core.product_pricing(currency);
 CREATE INDEX idx_pricing_effective ON core.product_pricing(effective_date);
 CREATE INDEX idx_pricing_active ON core.product_pricing(is_active);
 
-CREATE TRIGGER trg_pricing_updated_at
-BEFORE UPDATE ON core.product_pricing
-FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
+
 
 
 ---- product_identifiers
+
 CREATE TABLE core.product_identifiers (
     identifier_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     product_id INT NOT NULL REFERENCES core.products(product_id) ON DELETE CASCADE,
@@ -499,9 +460,7 @@ CREATE INDEX idx_identifiers_type ON core.product_identifiers(identifier_type);
 CREATE INDEX idx_identifiers_value ON core.product_identifiers(identifier_value);
 CREATE INDEX idx_identifiers_primary ON core.product_identifiers(is_primary);
 
-CREATE TRIGGER trg_identifiers_updated_at
-BEFORE UPDATE ON core.product_identifiers
-FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
+
 
 ---- Ensure only one primary identifier per product/type
 CREATE OR REPLACE FUNCTION core.ensure_single_primary_identifier()
@@ -518,9 +477,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE TRIGGER trg_primary_identifier_check
-BEFORE INSERT OR UPDATE ON core.product_identifiers
-FOR EACH ROW EXECUTE FUNCTION core.ensure_single_primary_identifier();
+
 
 
 ---- product_inventory
@@ -528,7 +485,7 @@ FOR EACH ROW EXECUTE FUNCTION core.ensure_single_primary_identifier();
 CREATE TABLE core.product_inventory (
     inventory_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     product_id INT NOT NULL REFERENCES core.products(product_id) ON DELETE CASCADE,
-    warehouse_id INT NOT NULL REFERENCES core.warehouses(warehouse_id),
+    company_id INT NOT NULL REFERENCES core.companies(company_id),
     current_stock INT DEFAULT 0,
     reserved_stock INT DEFAULT 0,
     available_stock INT GENERATED ALWAYS AS (current_stock - reserved_stock) STORED,
@@ -540,16 +497,9 @@ CREATE TABLE core.product_inventory (
     cost_per_unit DECIMAL(12,2),
     created_at timestamptz DEFAULT now() NOT NULL,
     updated_at timestamptz DEFAULT now() NOT NULL,
-    UNIQUE (product_id, warehouse_id)
+    UNIQUE (product_id, company_id)
 );
 
-CREATE INDEX idx_reginfo_product ON core.product_regulatory_info(product_id);
-CREATE INDEX idx_reginfo_hazardous ON core.product_regulatory_info(is_hazardous);
-CREATE INDEX idx_reginfo_hazard_class ON core.product_regulatory_info(hazard_classification);
-
-CREATE TRIGGER trg_reginfo_updated_at
-BEFORE UPDATE ON core.product_regulatory_info
-FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
 
 
 -- product_certifications
@@ -571,26 +521,22 @@ CREATE TABLE core.product_certifications (
 
 CREATE INDEX idx_certs_product ON core.product_certifications(product_id);
 CREATE INDEX idx_certs_status ON core.product_certifications(status);
-CREATE INDEX idx_certs_expiry ON core.product_certifications(expiry_date);
+CREATE INDEX idx_certs_expiry ON core.product_certifications(expirydate);
 
-CREATE TRIGGER trg_certs_updated_at
-BEFORE UPDATE ON core.product_certifications
-FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
+
 
 ---- Automatically expire outdated certifications
 CREATE OR REPLACE FUNCTION core.auto_expire_certifications()
 RETURNS TRIGGER AS $$
 BEGIN
-  IF NEW.expiry_date IS NOT NULL AND NEW.expiry_date < CURRENT_DATE THEN
+  IF NEW.expirydate IS NOT NULL AND NEW.expirydate < CURRENT_DATE THEN
     NEW.status := 'Expired';
   END IF;
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE TRIGGER trg_certifications_expiry
-BEFORE INSERT OR UPDATE ON core.product_certifications
-FOR EACH ROW EXECUTE FUNCTION core.auto_expire_certifications();
+
 
 
 -- Auto-activate/discontinue products by date
@@ -608,13 +554,8 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE TRIGGER trg_products_status
-BEFORE UPDATE ON core.products
-FOR EACH ROW EXECUTE FUNCTION core.auto_update_product_status();
 
 
-
-USE core;
 
 -- Customers table
 CREATE TABLE core.customers (
@@ -769,7 +710,7 @@ CREATE TABLE core.transaction_addresses (
     city   VARCHAR(50),
     state_province  VARCHAR(50),
     postal_code   VARCHAR(20),
-    country_id  VARCHAR(10) REFERENCES core.customer_country(country_code),
+    country_id  BIGINT NOT NULL REFERENCES core.customer_country(country_id),
     phone   VARCHAR(20),
     email   VARCHAR(50),
     delivery_instructions TEXT
@@ -787,11 +728,10 @@ CREATE TABLE core.transaction_items (
     discount_amount  DECIMAL(15,2) DEFAULT 0,
     subtotal   DECIMAL(15,2) GENERATED ALWAYS AS (quantity * unit_price - discount_amount) STORED,
     tax_amount   DECIMAL(15,2) DEFAULT 0,
-    line_total   DECIMAL(15,2) GENERATED ALWAYS AS (subtotal + tax_amount) STORED,
+    line_total   DECIMAL(15,2) GENERATED ALWAYS AS ((quantity * unit_price) + tax_amount) STORED,
     cost_price   DECIMAL(15,2),
     margin   DECIMAL(15,2) GENERATED ALWAYS AS ((quantity * unit_price - discount_amount + tax_amount) - (quantity * cost_price)) STORED,
     item_status  VARCHAR(20) NOT NULL DEFAULT 'Ordered' CHECK (item_status IN ('Ordered','Backordered','Shipped','Delivered','Returned','Cancelled')),
-    warehouse_id  BIGINT REFERENCES core.warehouses(warehouse_id),
     batch_number  VARCHAR(50),
     serial_number   VARCHAR(100),
     item_expiry_date   DATE,
@@ -954,7 +894,6 @@ CREATE INDEX idx_transactions_date ON core.transactions(transaction_date);
 -- Transaction Items
 CREATE INDEX idx_transaction_items_transaction_id ON core.transaction_items(transaction_id);
 CREATE INDEX idx_transaction_items_product_id ON core.transaction_items(product_id);
-CREATE INDEX idx_transaction_items_warehouse_id ON core.transaction_items(warehouse_id);
 
 -- Transaction Payments
 CREATE INDEX idx_transaction_payments_transaction_id ON core.transaction_payments(transaction_id);
@@ -981,67 +920,6 @@ CREATE INDEX idx_return_items_transaction_item_id ON core.return_items(transacti
 
 
 
--- TRIGGER FUNCTION FOR updated_at
-
-CREATE OR REPLACE FUNCTION core.set_updated_at()
-RETURNS TRIGGER AS $$
-BEGIN
-  NEW.updated_at = NOW();
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-
--- APPLY updated_at TRIGGERS TO TABLES
--- Customer tables
-CREATE TRIGGER trg_customers_updated_at
-BEFORE UPDATE ON core.customers
-FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
-
-CREATE TRIGGER trg_customers_profile_updated_at
-BEFORE UPDATE ON core.customers_profile
-FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
-
-CREATE TRIGGER trg_customers_business_updated_at
-BEFORE UPDATE ON core.customers_business
-FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
-
-CREATE TRIGGER trg_customer_contact_updated_at
-BEFORE UPDATE ON core.customer_contact
-FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
-
-CREATE TRIGGER trg_customer_phone_updated_at
-BEFORE UPDATE ON core.customer_phone
-FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
-
-CREATE TRIGGER trg_customer_credit_updated_at
-BEFORE UPDATE ON core.customer_credit
-FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
-
--- Transaction tables
-CREATE TRIGGER trg_transactions_updated_at
-BEFORE UPDATE ON core.transactions
-FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
-
-CREATE TRIGGER trg_transaction_items_updated_at
-BEFORE UPDATE ON core.transaction_items
-FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
-
-CREATE TRIGGER trg_transaction_payments_updated_at
-BEFORE UPDATE ON core.transaction_payments
-FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
-
-CREATE TRIGGER trg_transaction_shipments_updated_at
-BEFORE UPDATE ON core.transaction_shipments
-FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
-
-CREATE TRIGGER trg_transaction_returns_updated_at
-BEFORE UPDATE ON core.transaction_returns
-FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
-
-
-
-USE core;
 
 DO $$
 BEGIN

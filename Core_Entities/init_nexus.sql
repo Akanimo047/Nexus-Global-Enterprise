@@ -4,21 +4,27 @@
 --   Purpose: Initialize base database, roles, and core schema
 
 
--- Create top-level owner role
+-- Connect to an existing database first (postgres)
+-- \c postgres
+
+-- Create the NEXUS_GLOBAL database
+
 DO
 $$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'nexus_owner') THEN
-        CREATE ROLE nexus_owner LOGIN PASSWORD 'nexusglobal';
+        CREATE ROLE nexus_owner LOGIN PASSWORD 'StrongOwnerPasswordHere';
     END IF;
 END
 $$;
 
--- Create the main NEXUS database
+
 DO
 $$
 BEGIN
-    IF NOT EXISTS (SELECT FROM pg_database WHERE datname = 'nexus_global') THEN
+    IF NOT EXISTS (
+        SELECT FROM pg_database WHERE datname = 'nexus_global'
+    ) THEN
         CREATE DATABASE nexus_global
         WITH 
             OWNER = nexus_owner
@@ -31,8 +37,10 @@ BEGIN
 END
 $$;
 
+
+
 --  Connect to the Nexus Global database
-\c nexus_global
+-- \c nexus_global
 
 --   ROLE HIERARCHY
 
