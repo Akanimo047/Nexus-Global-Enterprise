@@ -1,257 +1,620 @@
-CREATE TABLE PRODUCTS (
-    product_id INT PRIMARY KEY AUTO_INCREMENT,
+CREATE SCHEMA IF NOT EXISTS core AUTHORIZATION current_user;
+SET search_path = core;
+
+
+CREATE TYPE core.gender_t AS ENUM ('Male','Female','Other','Prefer not to say');
+CREATE TYPE core.employment_type_t AS ENUM ('fulltime','parttime','contract','intern');
+CREATE TYPE core.employee_status_t AS ENUM ('Active','On Leave','Terminated','Retired','Suspended');
+CREATE TYPE core.company_status_t AS ENUM ('Active','Inactive','Merged','Closed');
+CREATE TYPE core.division_status_t AS ENUM ('Active','Inactive','Restructuring','Dissolved');
+CREATE TYPE core.department_type_t AS ENUM ('Operations','Support','Revenue','Cost Center','Profit Center');
+CREATE TYPE core.department_status_t AS ENUM ('Active','Inactive','Restructuring','Merged');
+CREATE TYPE core.budget_period_t AS ENUM ('Annual','Quarterly','Monthly');
+CREATE TYPE core.budget_status_t AS ENUM ('Draft','Submitted','Approved','Rejected','Active','Closed');
+CREATE TYPE core.compliance_status_t AS ENUM ('Compliant','Non-Compliant','In Progress','Not Applicable');
+CREATE TYPE core.job_level_t AS ENUM ('entry','junior','mid','senior','lead');
+CREATE TYPE core.company_type_t AS ENUM ('Manufacturing','Healthcare','Entertainment','Retail','Technology','Finance','Energy','Public','NonProfit','Other');
+CREATE TYPE core.pay_frequency_t AS ENUM ('Monthly','BiWeekly','Weekly','Daily');
+
+
+CREATE OR REPLACE FUNCTION core.trigger_set_timestamp()
+RETURNS trigger AS $$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+---- locations
+CREATE TABLE core.locations (
+  location_id            INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  country                VARCHAR(100) NOT NULL,
+  country_code           VARCHAR(10),
+  province               VARCHAR(100),
+  timezone               VARCHAR(100),
+  city                   VARCHAR(100),
+  location_address       TEXT,
+  postal_code            VARCHAR(30),
+  email                  VARCHAR(200),
+  created_at             timestamptz DEFAULT now() NOT NULL,
+  updated_at             timestamptz DEFAULT now() NOT NULL,
+  created_by             INT,
+  updated_by             INT
+);
+
+CREATE INDEX ix_locations_country ON core.locations(country);
+CREATE INDEX ix_locations_city ON core.locations(city);
+
+
+
+---- companies
+CREATE TABLE core.companies (
+  company_id             INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  location_id            INT REFERENCES core.locations(location_id) ON DELETE SET NULL,
+  company_code           VARCHAR(20) UNIQUE NOT NULL,
+  company_name           VARCHAR(200) NOT NULL,
+  legal_name             VARCHAR(200),
+  company_type           core.company_type_t,
+  manager_employee_id    INT, -- FK to employees defined later (add constraint after employees created)
+  employee_count         INT DEFAULT 0,
+  tax_id                 VARCHAR(50) UNIQUE,
+  registration_number    VARCHAR(50),
+  parent_company_id      INT REFERENCES core.companies(company_id) ON DELETE SET NULL,
+  website                VARCHAR(200),
+  founded_date           DATE,
+  company_status         core.company_status_t DEFAULT 'Active',
+  created_at             timestamptz DEFAULT now() NOT NULL,
+  updated_at             timestamptz DEFAULT now() NOT NULL,
+  created_by             INT,
+  updated_by             INT
+);
+
+CREATE UNIQUE INDEX ux_companies_company_code ON core.companies(company_code);
+CREATE INDEX ix_companies_location_id ON core.companies(location_id);
+
+---- divisions
+CREATE TABLE core.divisions (
+  division_id            INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  division_code          VARCHAR(20) UNIQUE NOT NULL,
+  division_name          VARCHAR(200) NOT NULL,
+  division_type          VARCHAR(100), -- free text for "manufacturing, healthcare, ..."; alternative: enum
+  parent_division_id     INT REFERENCES core.divisions(division_id) ON DELETE SET NULL,
+  division_head_employee_id INT, -- FK to employees (added later)
+  headquarters_location_id INT REFERENCES core.locations(location_id) ON DELETE SET NULL,
+  established_date       DATE,
+  country                VARCHAR(100),
+  division_status        core.division_status_t DEFAULT 'Active',
+  annual_revenue         DECIMAL(20,2),
+  revenue_currency       VARCHAR(10),
+  employee_count         INT DEFAULT 0,
+  fte_count              DECIMAL(8,2),
+  organizational_level   INT DEFAULT 1,
+  created_at             timestamptz DEFAULT now() NOT NULL,
+  updated_at             timestamptz DEFAULT now() NOT NULL,
+  created_by             INT,
+  updated_by             INT
+);
+
+CREATE UNIQUE INDEX ux_divisions_division_code ON core.divisions(division_code);
+CREATE INDEX ix_divisions_headquarters_location ON core.divisions(headquarters_location_id);
+
+
+CREATE TABLE core.regulatory_framework (
+  framework_id           INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  division_id            INT REFERENCES core.divisions(division_id) ON DELETE CASCADE,
+  framework_name         VARCHAR(200) NOT NULL,
+  framework_code         VARCHAR(100),
+  regulatory_body        VARCHAR(200),
+  country                VARCHAR(100),
+  framework_description       TEXT,
+  created_at             timestamptz DEFAULT now() NOT NULL,
+  updated_at             timestamptz DEFAULT now() NOT NULL
+);
+
+CREATE INDEX ix_regframework_division_id ON core.regulatory_framework(division_id);
+
+
+CREATE TABLE core.division_regulatory_requirements (
+  requirement_id         INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  division_id            INT NOT NULL REFERENCES core.divisions(division_id) ON DELETE CASCADE,
+  framework_id           INT NOT NULL REFERENCES core.regulatory_framework(framework_id) ON DELETE CASCADE,
+  compliance_status      core.compliance_status_t DEFAULT 'In Progress',
+  effective_date         DATE,
+  review_date            DATE,
+  expirydate            DATE,
+  certification_number   VARCHAR(100),
+  notes                  TEXT,
+  created_at             timestamptz DEFAULT now() NOT NULL,
+  updated_at             timestamptz DEFAULT now() NOT NULL
+);
+
+CREATE INDEX ix_divreq_division ON core.division_regulatory_requirements(division_id);
+CREATE INDEX ix_divreq_framework ON core.division_regulatory_requirements(framework_id);
+
+
+---- departments
+CREATE TABLE core.departments (
+  department_id          INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  department_code        VARCHAR(20) UNIQUE NOT NULL,
+  department_name        VARCHAR(200) NOT NULL,
+  division_id            INT NOT NULL REFERENCES core.divisions(division_id) ON DELETE RESTRICT,
+  parent_department_id   INT REFERENCES core.departments(department_id) ON DELETE SET NULL,
+  manager_id             INT, -- FK to employees (added later)
+  location_id            INT REFERENCES core.locations(location_id) ON DELETE SET NULL,
+  department_type        core.department_type_t DEFAULT 'Operations',
+  cost_center_code       VARCHAR(20),
+  department_status      core.department_status_t DEFAULT 'Active',
+  established_date       DATE,
+  employee_count         INT DEFAULT 0,
+  fte_count              DECIMAL(8,2),
+  organizational_level   INT DEFAULT 1,
+  dept_description            TEXT,
+  created_at             timestamptz DEFAULT now() NOT NULL,
+  updated_at             timestamptz DEFAULT now() NOT NULL,
+  created_by             INT,
+  updated_by             INT
+);
+
+CREATE UNIQUE INDEX ux_departments_department_code ON core.departments(department_code);
+CREATE INDEX ix_departments_division_id ON core.departments(division_id);
+
+
+CREATE TABLE core.budgets (
+  budget_id              INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  entity_type            VARCHAR(20) NOT NULL, -- 'Company', 'Division', 'Department'
+  entity_id              INT NOT NULL,
+  budget_year            INT NOT NULL,
+  budget_period          core.budget_period_t DEFAULT 'Annual',
+  startdate             DATE,
+  enddate               DATE,
+  budget_category        VARCHAR(100),
+  allocated_amount       DECIMAL(20,2) NOT NULL,
+  currency               VARCHAR(10) NOT NULL,
+  approved_amount        DECIMAL(20,2),
+  spent_amount           DECIMAL(20,2) DEFAULT 0,
+  remaining_amount       DECIMAL(20,2) GENERATED ALWAYS AS (COALESCE(approved_amount,0) - COALESCE(spent_amount,0)) STORED,
+  budget_status          core.budget_status_t DEFAULT 'Draft',
+  approved_by            INT,
+  approved_date          DATE,
+  created_at             timestamptz DEFAULT now() NOT NULL,
+  updated_at             timestamptz DEFAULT now() NOT NULL,
+  created_by             INT,
+  updated_by             INT
+);
+
+CREATE INDEX ix_budgets_entity ON core.budgets(entity_type, entity_id, budget_year);
+CREATE INDEX ix_budgets_status ON core.budgets(budget_status);
+
+
+---- employees
+CREATE TABLE core.employees (
+  employee_id            INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  employee_no            VARCHAR(50) UNIQUE,
+  first_name             VARCHAR(100) NOT NULL,
+  last_name              VARCHAR(100) NOT NULL,
+  middle_name            VARCHAR(100),
+  email                  VARCHAR(200) UNIQUE,
+  date_of_birth          DATE,
+  phone                  VARCHAR(50),
+  gender                 core.gender_t,
+  nationality            VARCHAR(100),
+  company_id             INT REFERENCES core.companies(company_id) ON DELETE SET NULL,
+  hire_date              DATE,
+  termination_date       DATE,
+  employee_status        core.employee_status_t DEFAULT 'Active',
+  employment_type        core.employment_type_t DEFAULT 'fulltime',
+  created_at             timestamptz DEFAULT now() NOT NULL,
+  updated_at             timestamptz DEFAULT now() NOT NULL,
+  created_by             INT,
+  updated_by             INT
+);
+
+CREATE UNIQUE INDEX ux_employees_employee_no ON core.employees(employee_no);
+-- Case-insensitive index for email searches
+CREATE UNIQUE INDEX ux_employees_email_lower ON core.employees(LOWER(email));
+CREATE INDEX ix_employees_company_id ON core.employees(company_id);
+CREATE INDEX ix_employees_name ON core.employees(last_name, first_name);
+
+-- Add companies.manager_employee_id -> employees.employee_id as FK now:
+ALTER TABLE core.companies
+  ADD CONSTRAINT fk_companies_manager_employee
+  FOREIGN KEY (manager_employee_id) REFERENCES core.employees(employee_id) ON DELETE SET NULL;
+
+-- Add divisions.division_head_employee_id FK:
+ALTER TABLE core.divisions
+  ADD CONSTRAINT fk_divisions_head_employee
+  FOREIGN KEY (division_head_employee_id) REFERENCES core.employees(employee_id) ON DELETE SET NULL;
+
+-- Add departments.manager_id FK:
+ALTER TABLE core.departments
+  ADD CONSTRAINT fk_departments_manager_employee
+  FOREIGN KEY (manager_id) REFERENCES core.employees(employee_id) ON DELETE SET NULL;
+
+
+CREATE TABLE core.employee_location (
+  location_id            INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  employee_id            INT NOT NULL REFERENCES core.employees(employee_id) ON DELETE CASCADE,
+  country                VARCHAR(100),
+  employee_address                TEXT,
+  city                   VARCHAR(100),
+  postal_code            VARCHAR(30),
+  created_at             timestamptz DEFAULT now() NOT NULL,
+  updated_at             timestamptz DEFAULT now() NOT NULL
+);
+
+CREATE INDEX ix_emp_loc_employee_id ON core.employee_location(employee_id);
+
+
+
+CREATE TABLE core.employee_contacts (
+  contact_id             INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  employee_id            INT NOT NULL REFERENCES core.employees(employee_id) ON DELETE CASCADE,
+  emergency_name         VARCHAR(200),
+  emergency_number       VARCHAR(50),
+  relation               VARCHAR(100),
+  created_at             timestamptz DEFAULT now() NOT NULL,
+  updated_at             timestamptz DEFAULT now() NOT NULL
+);
+
+CREATE INDEX ix_emp_contacts_employee ON core.employee_contacts(employee_id);
+
+
+CREATE TABLE core.employee_job_title (
+  job_id                 INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  employee_id            INT NOT NULL REFERENCES core.employees(employee_id) ON DELETE CASCADE,
+  job_title              VARCHAR(200) NOT NULL,
+  job_level              core.job_level_t,
+  department_id          INT REFERENCES core.departments(department_id) ON DELETE SET NULL,
+  startdate             DATE,
+  enddate               DATE,
+  created_at             timestamptz DEFAULT now() NOT NULL,
+  updated_at             timestamptz DEFAULT now() NOT NULL
+);
+
+CREATE INDEX ix_emp_job_employee ON core.employee_job_title(employee_id);
+CREATE INDEX ix_emp_job_department ON core.employee_job_title(department_id);
+
+
+CREATE TABLE core.employee_bank_info (
+  bank_info_id           INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  employee_id            INT NOT NULL REFERENCES core.employees(employee_id) ON DELETE CASCADE,
+  salary                 DECIMAL(20,2),
+  currency               VARCHAR(10),
+  pay_frequency          core.pay_frequency_t,
+  bank_name              VARCHAR(200),
+  account_number         VARCHAR(100),
+  swift_code             VARCHAR(50),
+  created_at             timestamptz DEFAULT now() NOT NULL,
+  updated_at             timestamptz DEFAULT now() NOT NULL
+);
+
+CREATE INDEX ix_emp_bank_employee ON core.employee_bank_info(employee_id);
+CREATE INDEX ix_emp_bank_acct ON core.employee_bank_info(account_number);
+
+
+
+CREATE TABLE core.employee_department (
+  employee_department_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  department_id          INT NOT NULL REFERENCES core.departments(department_id) ON DELETE RESTRICT,
+  employee_id            INT NOT NULL REFERENCES core.employees(employee_id) ON DELETE CASCADE,
+  division_id            INT REFERENCES core.divisions(division_id) ON DELETE SET NULL,
+  manager_id             INT REFERENCES core.employees(employee_id) ON DELETE SET NULL,
+  created_at             timestamptz DEFAULT now() NOT NULL,
+  updated_at             timestamptz DEFAULT now() NOT NULL
+);
+
+CREATE INDEX ix_emp_dept_employee ON core.employee_department(employee_id);
+CREATE INDEX ix_emp_dept_department ON core.employee_department(department_id);
+
+
+CREATE TABLE core.employee_assignment (
+  assignment_id          INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  employee_id            INT NOT NULL REFERENCES core.employees(employee_id) ON DELETE CASCADE,
+  job_id                 INT REFERENCES core.employee_job_title(job_id) ON DELETE SET NULL,
+  department_id          INT REFERENCES core.departments(department_id) ON DELETE SET NULL,
+  startdate             DATE DEFAULT CURRENT_DATE,
+  enddate               DATE,
+  is_active              BOOLEAN DEFAULT TRUE,
+  created_at             timestamptz DEFAULT now() NOT NULL,
+  updated_at             timestamptz DEFAULT now() NOT NULL
+);
+
+CREATE INDEX ix_emp_assign_employee ON core.employee_assignment(employee_id);
+CREATE INDEX ix_emp_assign_is_active ON core.employee_assignment(is_active);
+
+
+-- Triggers to maintain updated_at, attach trigger to all tables that have updated_at columns
+DO $$
+DECLARE
+  tbl text;
+BEGIN
+  FOR tbl IN
+    SELECT table_name
+    FROM information_schema.columns
+    WHERE table_schema = 'core'
+      AND column_name = 'updated_at'
+  LOOP
+    EXECUTE format('
+      DROP TRIGGER IF EXISTS trg_set_timestamp ON core.%I;
+      CREATE TRIGGER trg_set_timestamp
+      BEFORE UPDATE ON core.%I
+      FOR EACH ROW EXECUTE FUNCTION core.trigger_set_timestamp();
+    ', tbl, tbl);
+  END LOOP;
+END;
+$$;
+
+
+
+
+-- enum types
+CREATE TYPE core.product_type_t AS ENUM ('Physical Product', 'Digital Product', 'Service', 'Subscription', 'Bundle', 'Kit');
+CREATE TYPE core.product_status_t AS ENUM ('active', 'inactive', 'discontinued', 'draft', 'pending approval');
+CREATE TYPE core.attribute_type_t AS ENUM ('Text', 'Number', 'Boolean', 'Date', 'List', 'URL');
+CREATE TYPE core.price_type_t AS ENUM ('Base', 'Cost', 'Retail', 'Wholesale', 'Promotional', 'MSRP', 'Discount');
+CREATE TYPE core.identifier_type_t AS ENUM ('Barcode', 'UPC', 'EAN', 'ISBN', 'SKU', 'GTIN', 'Internal', 'Model Number', 'Serial Number');
+CREATE TYPE core.hazard_classification_t AS ENUM ('Explosives', 'Flammable', 'Oxidizers', 'Toxic substances', 'Corrosives', 'Environmental hazard', 'None');
+CREATE TYPE core.cert_status_t AS ENUM ('Valid', 'Expired', 'Pending', 'Revoked');
+
+
+---- Generic trigger to update "updated_at"
+
+CREATE OR REPLACE FUNCTION core.set_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+
+---- products
+
+CREATE TABLE core.products (
+    product_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     product_code VARCHAR(50) UNIQUE NOT NULL,
     product_name VARCHAR(255) NOT NULL,
-    product_type ENUM('Physical Product', 'Digital Product', 'Service', 'Subscription', 'Bundle', 'Kit') NOT NULL,
+    product_type core.product_type_t NOT NULL,
     brand VARCHAR(100),
     manufacturer VARCHAR(150),
     country_of_origin VARCHAR(100),
     category VARCHAR(100),
     sub_category VARCHAR(100),
     product_description TEXT,
-    product_status ENUM('active', 'inactive', 'discontinued', 'draft', 'pending approval') DEFAULT 'draft',
+    product_status core.product_status_t DEFAULT 'draft',
     launch_date DATE,
     discontinue_date DATE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    created_at timestamptz DEFAULT now() NOT NULL,
+    updated_at timestamptz DEFAULT now() NOT NULL,
     created_by VARCHAR(100),
-    updated_by VARCHAR(100),
-    
-    INDEX idx_product_code (product_code),
-    INDEX idx_product_name (product_name),
-    INDEX idx_product_type (product_type),
-    INDEX idx_brand (brand),
-    INDEX idx_manufacturer (manufacturer),
-    INDEX idx_category (category, sub_category),
-    INDEX idx_product_status (product_status),
-    INDEX idx_launch_date (launch_date)
+    updated_by VARCHAR(100)
 );
 
+CREATE INDEX idx_products_code ON core.products(product_code);
+CREATE INDEX idx_products_name ON core.products(product_name);
+CREATE INDEX idx_products_type ON core.products(product_type);
+CREATE INDEX idx_products_category ON core.products(category, sub_category);
+CREATE INDEX idx_products_status ON core.products(product_status);
+CREATE INDEX idx_products_launch_date ON core.products(launch_date);
 
-CREATE TABLE PRODUCT_DIMENSIONS (
-    dimension_id INT PRIMARY KEY AUTO_INCREMENT,
-    product_id INT NOT NULL UNIQUE,
+CREATE TRIGGER trg_products_updated_at
+BEFORE UPDATE ON core.products
+FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
+
+ 
+---- product_dimensions
+
+CREATE TABLE core.product_dimensions (
+    dimension_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    product_id INT NOT NULL UNIQUE REFERENCES core.products(product_id) ON DELETE CASCADE,
     length_metres DECIMAL(10,4),
     width_metres DECIMAL(10,4),
     height_metres DECIMAL(10,4),
-    weight_kg DECIMAL(10,4), 
+    weight_kg DECIMAL(10,4),
     volume_cubic_metre DECIMAL(10,4),
     packaging_length_metres DECIMAL(10,4),
     packaging_width_metres DECIMAL(10,4),
     packaging_height_metres DECIMAL(10,4),
     packaging_weight_kg DECIMAL(10,4),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    
-    FOREIGN KEY (product_id) REFERENCES PRODUCTS(product_id) ON DELETE CASCADE,
-    INDEX idx_product_id (product_id),
-    INDEX idx_weight (weight_kg),
-    INDEX idx_volume (volume_cubic_metre)
+    created_at timestamptz DEFAULT now() NOT NULL,
+    updated_at timestamptz DEFAULT now() NOT NULL
 );
 
+CREATE INDEX idx_dimensions_weight ON core.product_dimensions(weight_kg);
+CREATE INDEX idx_dimensions_volume ON core.product_dimensions(volume_cubic_metre);
 
-CREATE TABLE SPECIFICATION_ATTRIBUTES (
-    attribute_id INT PRIMARY KEY AUTO_INCREMENT,
-    product_id INT NOT NULL,
+CREATE TRIGGER trg_dimensions_updated_at
+BEFORE UPDATE ON core.product_dimensions
+FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
+
+
+--== specification_attributes
+
+CREATE TABLE core.specification_attributes (
+    attribute_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    product_id INT NOT NULL REFERENCES core.products(product_id) ON DELETE CASCADE,
     attribute_name VARCHAR(100) NOT NULL,
     attribute_value TEXT,
-    attribute_type ENUM('Text', 'Number', 'Boolean', 'Date', 'List', 'URL') DEFAULT 'Text',
+    attribute_type core.attribute_type_t DEFAULT 'Text',
     unit_of_measure VARCHAR(20),
     is_searchable BOOLEAN DEFAULT FALSE,
     display_order INT DEFAULT 0,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    
-    FOREIGN KEY (product_id) REFERENCES PRODUCTS(product_id) ON DELETE CASCADE,
-    INDEX idx_product_id (product_id),
-    INDEX idx_attribute_name (attribute_name),
-    INDEX idx_is_searchable (is_searchable),
-    INDEX idx_display_order (display_order)
+    created_at timestamptz DEFAULT now() NOT NULL,
+    updated_at timestamptz DEFAULT now() NOT NULL
 );
 
+CREATE INDEX idx_attributes_product ON core.specification_attributes(product_id);
+CREATE INDEX idx_attributes_name ON core.specification_attributes(attribute_name);
+CREATE INDEX idx_attributes_searchable ON core.specification_attributes(is_searchable);
 
-CREATE TABLE PRODUCT_PRICING (
-    pricing_id INT PRIMARY KEY AUTO_INCREMENT,
-    product_id INT NOT NULL,
-    price_type ENUM('Base', 'Cost', 'Retail', 'Wholesale', 'Promotional', 'MSRP', 'Discount') NOT NULL,
-    price_amount DECIMAL(12,2) NOT NULL, 
+CREATE TRIGGER trg_attributes_updated_at
+BEFORE UPDATE ON core.specification_attributes
+FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
+
+
+-- product_pricing
+
+CREATE TABLE core.product_pricing (
+    pricing_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    product_id INT NOT NULL REFERENCES core.products(product_id) ON DELETE CASCADE,
+    price_type core.price_type_t NOT NULL,
+    price_amount DECIMAL(12,2) NOT NULL,
     currency VARCHAR(3) DEFAULT 'USD',
-    effective_date DATE NOT NULL DEFAULT (CURRENT_DATE),
-    expiry_date DATE,
+    effective_date DATE DEFAULT CURRENT_DATE,
+    expirydate DATE,
     min_quantity INT DEFAULT 1,
     max_quantity INT,
     is_active BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    created_at timestamptz DEFAULT now() NOT NULL,
+    updated_at timestamptz DEFAULT now() NOT NULL,
     created_by VARCHAR(100),
-    updated_by VARCHAR(100),
-    
-    FOREIGN KEY (product_id) REFERENCES PRODUCTS(product_id) ON DELETE CASCADE,
-    INDEX idx_product_id (product_id),
-    INDEX idx_price_type (price_type),
-    INDEX idx_currency (currency),
-    INDEX idx_effective_date (effective_date),
-    INDEX idx_is_active (is_active)
+    updated_by VARCHAR(100)
 );
 
+CREATE INDEX idx_pricing_product ON core.product_pricing(product_id);
+CREATE INDEX idx_pricing_type ON core.product_pricing(price_type);
+CREATE INDEX idx_pricing_currency ON core.product_pricing(currency);
+CREATE INDEX idx_pricing_effective ON core.product_pricing(effective_date);
+CREATE INDEX idx_pricing_active ON core.product_pricing(is_active);
 
-CREATE TABLE PRODUCT_IDENTIFIERS (
-    identifier_id INT PRIMARY KEY AUTO_INCREMENT,
-    product_id INT NOT NULL,
-    identifier_type ENUM('Barcode', 'UPC', 'EAN', 'ISBN', 'SKU', 'GTIN', 'Internal', 'Model Number', 'Serial Number') NOT NULL,
+CREATE TRIGGER trg_pricing_updated_at
+BEFORE UPDATE ON core.product_pricing
+FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
+
+
+---- product_identifiers
+CREATE TABLE core.product_identifiers (
+    identifier_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    product_id INT NOT NULL REFERENCES core.products(product_id) ON DELETE CASCADE,
+    identifier_type core.identifier_type_t NOT NULL,
     identifier_value VARCHAR(100) NOT NULL,
     is_primary BOOLEAN DEFAULT FALSE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    
-    FOREIGN KEY (product_id) REFERENCES PRODUCTS(product_id) ON DELETE CASCADE,
-    INDEX idx_product_id (product_id),
-    INDEX idx_identifier_type (identifier_type),
-    INDEX idx_identifier_value (identifier_value),
-    INDEX idx_is_primary (is_primary),
-    UNIQUE KEY unique_identifier (identifier_type, identifier_value)
+    created_at timestamptz DEFAULT now() NOT NULL,
+    updated_at timestamptz DEFAULT now() NOT NULL,
+    UNIQUE (identifier_type, identifier_value)
 );
 
+CREATE INDEX idx_identifiers_product ON core.product_identifiers(product_id);
+CREATE INDEX idx_identifiers_type ON core.product_identifiers(identifier_type);
+CREATE INDEX idx_identifiers_value ON core.product_identifiers(identifier_value);
+CREATE INDEX idx_identifiers_primary ON core.product_identifiers(is_primary);
 
-CREATE TABLE PRODUCT_INVENTORY (
-    inventory_id INT PRIMARY KEY AUTO_INCREMENT,
-    product_id INT NOT NULL,
-    warehouse_id INT NOT NULL,
+CREATE TRIGGER trg_identifiers_updated_at
+BEFORE UPDATE ON core.product_identifiers
+FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
+
+---- Ensure only one primary identifier per product/type
+CREATE OR REPLACE FUNCTION core.ensure_single_primary_identifier()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF NEW.is_primary THEN
+    UPDATE core.product_identifiers
+    SET is_primary = FALSE
+    WHERE product_id = NEW.product_id
+      AND identifier_type = NEW.identifier_type
+      AND identifier_id <> NEW.identifier_id;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_primary_identifier_check
+BEFORE INSERT OR UPDATE ON core.product_identifiers
+FOR EACH ROW EXECUTE FUNCTION core.ensure_single_primary_identifier();
+
+
+---- product_inventory
+
+CREATE TABLE core.product_inventory (
+    inventory_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    product_id INT NOT NULL REFERENCES core.products(product_id) ON DELETE CASCADE,
+    warehouse_id INT NOT NULL REFERENCES core.warehouses(warehouse_id),
     current_stock INT DEFAULT 0,
     reserved_stock INT DEFAULT 0,
-    available_stock AS (current_stock - reserved_stock) STORED,
+    available_stock INT GENERATED ALWAYS AS (current_stock - reserved_stock) STORED,
     minimum_stock INT DEFAULT 0,
     maximum_stock INT,
     reorder_point INT DEFAULT 0,
     last_counted_date DATE,
-    last_moved_date TIMESTAMP,
+    last_moved_date timestamptz,
     cost_per_unit DECIMAL(12,2),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    
-    FOREIGN KEY (product_id) REFERENCES PRODUCTS(product_id) ON DELETE CASCADE,
-    FOREIGN KEY (warehouse_id) REFERENCES WAREHOUSES(warehouse_id),
-    INDEX idx_product_id (product_id),
-    INDEX idx_warehouse_id (warehouse_id),
-    INDEX idx_available_stock (available_stock),
-    INDEX idx_reorder_point (reorder_point),
-    INDEX idx_last_moved_date (last_moved_date),
-    UNIQUE KEY unique_product_warehouse (product_id, warehouse_id)
+    created_at timestamptz DEFAULT now() NOT NULL,
+    updated_at timestamptz DEFAULT now() NOT NULL,
+    UNIQUE (product_id, warehouse_id)
 );
 
+CREATE INDEX idx_reginfo_product ON core.product_regulatory_info(product_id);
+CREATE INDEX idx_reginfo_hazardous ON core.product_regulatory_info(is_hazardous);
+CREATE INDEX idx_reginfo_hazard_class ON core.product_regulatory_info(hazard_classification);
 
-CREATE TABLE PRODUCT_REGULATORY_INFO (
-    regulatory_id INT PRIMARY KEY AUTO_INCREMENT,
-    product_id INT NOT NULL UNIQUE,
-    is_hazardous BOOLEAN DEFAULT FALSE,
-    hazard_classification ENUM('Explosives', 'Flammable', 'Oxidizers', 'Toxic substances', 'Corrosives', 'Environmental hazard', 'None') DEFAULT 'None',
-    un_number VARCHAR(10), 
-    has_age_restriction BOOLEAN DEFAULT FALSE,
-    minimum_age INT,
-    requires_license BOOLEAN DEFAULT FALSE,
-    license_type VARCHAR(100),
-    export_restricted BOOLEAN DEFAULT FALSE,
-    import_restricted BOOLEAN DEFAULT FALSE,
-    restricted_countries TEXT, 
-    msds_document_path VARCHAR(500), 
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    
-    FOREIGN KEY (product_id) REFERENCES PRODUCTS(product_id) ON DELETE CASCADE,
-    INDEX idx_product_id (product_id),
-    INDEX idx_is_hazardous (is_hazardous),
-    INDEX idx_hazard_classification (hazard_classification),
-    INDEX idx_has_age_restriction (has_age_restriction),
-    INDEX idx_export_restricted (export_restricted)
-);
+CREATE TRIGGER trg_reginfo_updated_at
+BEFORE UPDATE ON core.product_regulatory_info
+FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
 
-CREATE TABLE PRODUCT_CERTIFICATIONS (
-    certification_id INT PRIMARY KEY AUTO_INCREMENT,
-    product_id INT NOT NULL,
+
+-- product_certifications
+
+CREATE TABLE core.product_certifications (
+    certification_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    product_id INT NOT NULL REFERENCES core.products(product_id) ON DELETE CASCADE,
     certification_name VARCHAR(100) NOT NULL,
     certifying_body VARCHAR(100),
     certificate_number VARCHAR(100),
-    issue_date DATE,
-    expiry_date DATE,
+    issuedate DATE,
+    expirydate DATE,
     certificate_document_path VARCHAR(500),
-    status ENUM('Valid', 'Expired', 'Pending', 'Revoked') DEFAULT 'Valid',
+    status core.cert_status_t DEFAULT 'Valid',
     certification_scope TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    
-    FOREIGN KEY (product_id) REFERENCES PRODUCTS(product_id) ON DELETE CASCADE,
-    INDEX idx_product_id (product_id),
-    INDEX idx_certification_name (certification_name),
-    INDEX idx_certifying_body (certifying_body),
-    INDEX idx_status (status),
-    INDEX idx_expiry_date (expiry_date)
+    created_at timestamptz DEFAULT now() NOT NULL,
+    updated_at timestamptz DEFAULT now() NOT NULL
 );
 
-DELIMITER $
-CREATE TRIGGER trg_product_identifier_primary_check
-    BEFORE INSERT ON PRODUCT_IDENTIFIERS
-    FOR EACH ROW
+CREATE INDEX idx_certs_product ON core.product_certifications(product_id);
+CREATE INDEX idx_certs_status ON core.product_certifications(status);
+CREATE INDEX idx_certs_expiry ON core.product_certifications(expiry_date);
+
+CREATE TRIGGER trg_certs_updated_at
+BEFORE UPDATE ON core.product_certifications
+FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
+
+---- Automatically expire outdated certifications
+CREATE OR REPLACE FUNCTION core.auto_expire_certifications()
+RETURNS TRIGGER AS $$
 BEGIN
-    IF NEW.is_primary = TRUE THEN
-        UPDATE PRODUCT_IDENTIFIERS 
-        SET is_primary = FALSE 
-        WHERE product_id = NEW.product_id AND identifier_type = NEW.identifier_type AND is_primary = TRUE;
-    END IF;
-END$
-DELIMITER ;
+  IF NEW.expiry_date IS NOT NULL AND NEW.expiry_date < CURRENT_DATE THEN
+    NEW.status := 'Expired';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_certifications_expiry
+BEFORE INSERT OR UPDATE ON core.product_certifications
+FOR EACH ROW EXECUTE FUNCTION core.auto_expire_certifications();
 
 
-DELIMITER $
-CREATE TRIGGER trg_product_certification_expiry_check
-    BEFORE UPDATE ON PRODUCT_CERTIFICATIONS
-    FOR EACH ROW
+-- Auto-activate/discontinue products by date
+
+CREATE OR REPLACE FUNCTION core.auto_update_product_status()
+RETURNS TRIGGER AS $$
 BEGIN
-    IF NEW.expiry_date < CURRENT_DATE AND OLD.status = 'Valid' THEN
-        SET NEW.status = 'Expired';
-    END IF;
-END$
-DELIMITER ;
+  IF NEW.launch_date IS NOT NULL AND NEW.launch_date <= CURRENT_DATE AND OLD.product_status = 'draft' THEN
+    NEW.product_status := 'active';
+  END IF;
+  IF NEW.discontinue_date IS NOT NULL AND NEW.discontinue_date <= CURRENT_DATE AND OLD.product_status = 'active' THEN
+    NEW.product_status := 'discontinued';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_products_status
+BEFORE UPDATE ON core.products
+FOR EACH ROW EXECUTE FUNCTION core.auto_update_product_status();
 
 
-DELIMITER $
-CREATE TRIGGER trg_product_status_date_check
-    BEFORE UPDATE ON PRODUCTS
-    FOR EACH ROW
-BEGIN
-    
-    IF NEW.launch_date <= CURRENT_DATE AND OLD.product_status = 'draft' THEN
-        SET NEW.product_status = 'active';
-    END IF;
-    
-    
-    IF NEW.discontinue_date <= CURRENT_DATE AND OLD.product_status = 'active' THEN
-        SET NEW.product_status = 'discontinued';
-    END IF;
-END$
-DELIMITER ;
 
-
-DELIMITER $
-CREATE TRIGGER trg_inventory_negative_check
-    BEFORE UPDATE ON PRODUCT_INVENTORY
-    FOR EACH ROW
-BEGIN
-    IF NEW.current_stock < 0 THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Current stock cannot be negative';
-    END IF;
-    
-    IF NEW.reserved_stock < 0 THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Reserved stock cannot be negative';
-    END IF;
-    
-    
-    IF NEW.current_stock != OLD.current_stock THEN
-        SET NEW.last_moved_date = CURRENT_TIMESTAMP;
-    END IF;
-END$
-DELIMITER ;
-USE nexus_core;
-CREATE SCHEMA core;
+USE core;
 
 -- Customers table
 CREATE TABLE core.customers (
@@ -542,7 +905,143 @@ CREATE TABLE core.return_items (
     restock_quantity DECIMAL(10,4) DEFAULT 0,
     disposal_quantity DECIMAL(10,4) DEFAULT 0
 );
-CREATE SCHEMA IF NOT EXISTS core AUTHORIZATION current_user;
+
+
+
+-- Customers indexes
+CREATE INDEX idx_customers_status ON core.customers(customer_status);
+CREATE INDEX idx_customers_type ON core.customers(customer_type);
+CREATE INDEX idx_customers_registration_date ON core.customers(registration_date);
+
+-- Customer Profiles
+CREATE INDEX idx_customers_profile_customer_id ON core.customers_profile(customer_id);
+CREATE INDEX idx_customers_profile_name ON core.customers_profile(last_name, first_name);
+
+-- Customer Business
+CREATE INDEX idx_customers_business_customer_id ON core.customers_business(customer_id);
+CREATE INDEX idx_customers_business_name ON core.customers_business(corporate_name);
+CREATE INDEX idx_customers_business_tax_id ON core.customers_business(tax_id);
+
+-- Customer Country
+CREATE INDEX idx_customer_country_customer_id ON core.customer_country(customer_id);
+CREATE INDEX idx_customer_country_name ON core.customer_country(country_name);
+
+-- Customer Contact
+CREATE INDEX idx_customer_contact_customer_id ON core.customer_contact(customer_id);
+CREATE INDEX idx_customer_contact_country_id ON core.customer_contact(country_id);
+
+-- Customer Phone
+CREATE INDEX idx_customer_phone_customer_id ON core.customer_phone(customer_id);
+CREATE INDEX idx_customer_phone_country_id ON core.customer_phone(country_id);
+CREATE INDEX idx_customer_phone_number ON core.customer_phone(phone_number);
+
+-- Customer Emails
+CREATE INDEX idx_customer_emails_customer_id ON core.customer_emails(customer_id);
+CREATE INDEX idx_customer_emails_email_address ON core.customer_emails(email_address);
+
+-- Customer Credit
+CREATE INDEX idx_customer_credit_customer_id ON core.customer_credit(customer_id);
+CREATE INDEX idx_customer_credit_risk_level ON core.customer_credit(risk_level);
+
+-- Transactions indexes
+CREATE INDEX idx_transactions_customer_id ON core.transactions(customer_id);
+CREATE INDEX idx_transactions_employee_id ON core.transactions(employee_id);
+CREATE INDEX idx_transactions_division_id ON core.transactions(division_id);
+CREATE INDEX idx_transactions_location_id ON core.transactions(location_id);
+CREATE INDEX idx_transactions_status ON core.transactions(transaction_status);
+CREATE INDEX idx_transactions_date ON core.transactions(transaction_date);
+
+-- Transaction Items
+CREATE INDEX idx_transaction_items_transaction_id ON core.transaction_items(transaction_id);
+CREATE INDEX idx_transaction_items_product_id ON core.transaction_items(product_id);
+CREATE INDEX idx_transaction_items_warehouse_id ON core.transaction_items(warehouse_id);
+
+-- Transaction Payments
+CREATE INDEX idx_transaction_payments_transaction_id ON core.transaction_payments(transaction_id);
+CREATE INDEX idx_transaction_payments_status ON core.transaction_payments(payment_status);
+CREATE INDEX idx_transaction_payments_date ON core.transaction_payments(payment_date);
+
+-- Transaction Shipments
+CREATE INDEX idx_transaction_shipments_transaction_id ON core.transaction_shipments(transaction_id);
+CREATE INDEX idx_transaction_shipments_status ON core.transaction_shipments(shipment_status);
+CREATE INDEX idx_transaction_shipments_tracking ON core.transaction_shipments(tracking_number);
+
+-- Shipment Items
+CREATE INDEX idx_shipment_items_shipment_id ON core.shipment_items(shipment_id);
+CREATE INDEX idx_shipment_items_transaction_item_id ON core.shipment_items(transaction_item_id);
+
+-- Transaction Returns
+CREATE INDEX idx_transaction_returns_transaction_id ON core.transaction_returns(transaction_id);
+CREATE INDEX idx_transaction_returns_status ON core.transaction_returns(return_status);
+CREATE INDEX idx_transaction_returns_date ON core.transaction_returns(return_date);
+
+-- Return Items
+CREATE INDEX idx_return_items_return_id ON core.return_items(return_id);
+CREATE INDEX idx_return_items_transaction_item_id ON core.return_items(transaction_item_id);
+
+
+
+-- TRIGGER FUNCTION FOR updated_at
+
+CREATE OR REPLACE FUNCTION core.set_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+
+-- APPLY updated_at TRIGGERS TO TABLES
+-- Customer tables
+CREATE TRIGGER trg_customers_updated_at
+BEFORE UPDATE ON core.customers
+FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
+
+CREATE TRIGGER trg_customers_profile_updated_at
+BEFORE UPDATE ON core.customers_profile
+FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
+
+CREATE TRIGGER trg_customers_business_updated_at
+BEFORE UPDATE ON core.customers_business
+FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
+
+CREATE TRIGGER trg_customer_contact_updated_at
+BEFORE UPDATE ON core.customer_contact
+FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
+
+CREATE TRIGGER trg_customer_phone_updated_at
+BEFORE UPDATE ON core.customer_phone
+FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
+
+CREATE TRIGGER trg_customer_credit_updated_at
+BEFORE UPDATE ON core.customer_credit
+FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
+
+-- Transaction tables
+CREATE TRIGGER trg_transactions_updated_at
+BEFORE UPDATE ON core.transactions
+FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
+
+CREATE TRIGGER trg_transaction_items_updated_at
+BEFORE UPDATE ON core.transaction_items
+FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
+
+CREATE TRIGGER trg_transaction_payments_updated_at
+BEFORE UPDATE ON core.transaction_payments
+FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
+
+CREATE TRIGGER trg_transaction_shipments_updated_at
+BEFORE UPDATE ON core.transaction_shipments
+FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
+
+CREATE TRIGGER trg_transaction_returns_updated_at
+BEFORE UPDATE ON core.transaction_returns
+FOR EACH ROW EXECUTE FUNCTION core.set_updated_at();
+
+
+
+USE core;
 
 DO $$
 BEGIN
@@ -648,7 +1147,7 @@ CREATE TABLE IF NOT EXISTS core.supplier_payment_info (
     info_id SERIAL PRIMARY KEY,
     supplier_id INT NOT NULL REFERENCES core.supplier(supplier_id) ON DELETE CASCADE,
     payment_term_days INT,
-    description TEXT,
+    supp_description TEXT,
     currency CHAR(3),
     bank_name VARCHAR(200),
     account_number VARCHAR(128),
@@ -668,7 +1167,7 @@ CREATE TABLE IF NOT EXISTS core.supplier_certifications (
     certifying_body VARCHAR(200),
     issuing_body VARCHAR(200),
     issue_date DATE,
-    expiry_date DATE,
+    expirydate DATE,
     status core.cert_status_t DEFAULT 'Valid',
     certificate_file_path VARCHAR(1000),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
